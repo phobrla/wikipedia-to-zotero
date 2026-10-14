@@ -32,6 +32,66 @@ an offline article/snapshot downloader.
 
 ## Install
 
+### Zotero plugin (no Python required)
+
+Download the `.xpi` from the [latest release](https://github.com/phobrla/wikipedia-to-zotero/releases/latest).
+Requires **Zotero 10.0.x** on Windows, Linux, or macOS.
+
+1. In Zotero, open **Tools -> Plugins**.
+2. Use the gear menu -> **Install Plugin From File...**, select the `.xpi`, and
+   accept Zotero's installation prompt.
+3. Open **Tools -> Wikipedia Saved**:
+   - **Import from Wikipedia...** signs in and imports the account's saved lists.
+   - **Import saved CSV or JSON...** imports an existing export without logging in.
+   - **Export Wikipedia Saved to CSV...** creates a private CSV without importing
+     or deleting anything.
+
+Sign in inside Zotero's browser window, including any email verification or 2FA.
+The plugin does not receive or store your password. Login uses a separate cookie
+context; those cookies are removed at the end of the operation. Closing the login
+window cancels. This session is separate from your usual browser's login.
+If embedded sign-in is blocked by Wikipedia, use the browser export described
+below and the plugin's file-import command.
+
+Imports always target **My Library**, not a selected group library. The plugin
+shows counts and asks before starting. It uses Zotero's native database API
+(no local HTTP write authorization needed). It saves verified, private JSON
+source/metadata backups, a CSV, and a completion report under
+`wikipedia-to-zotero` inside the **Zotero data directory**. On Unix files are
+owner-readable only; on Windows keep the data directory private using Windows
+access controls. Existing files are never overwritten. Imports are saved in
+50-item transactions and verified after each batch and at completion. If the
+plugin is disabled or an error occurs, the operation stops; rerun to resume.
+
+**After a successful live import**, the plugin offers:
+
+- **Keep originals** (default): nothing is deleted on Wikipedia.
+- **Delete ALL originals...**: requires a second prompt in which you type the
+  signed-in Wikipedia username exactly.
+
+Deletion is **account-wide across Wikipedia languages**, including the default
+list and all custom folders. It does not hide Wikipedia's Saved/bookmark controls.
+There is no user-facing undo guarantee. Immediately before deletion, the plugin
+rechecks the account, every list, and every entry against the verified import.
+Changed/new data blocks deletion: import again instead. It uses Wikipedia's
+official `readinglists` `teardown` operation and verifies that lists are no longer
+set up afterward. Do not save/edit Wikipedia lists while an import or deletion
+is running: Wikipedia does not offer an atomic "delete only if unchanged" API.
+Avoid using another client to save items between the final check and deletion.
+
+File imports never offer deletion, since there is no authenticated live account
+to compare. Failed/incomplete imports, failed backups, and CSV-only exports also
+never offer deletion. Your Zotero items and local backups are not deleted.
+The plugin never automatically deletes data or changes Wikipedia preferences.
+
+The plugin and CLI use the same CSV format, so exports can be re-imported by
+either tool. Review CSVs in text-import mode rather than enabling spreadsheet
+formulas or external links. Empty folders are retained in JSON but not CSV.
+Reading-list names must be unique for CSV export and for the plugin's automatic
+CSV backup; ambiguous names stop the import rather than losing information.
+
+### Python CLI
+
 Clone or download this repository. These commands work from its directory:
 
 ```console
@@ -183,12 +243,32 @@ python -m unittest discover -s tests -v
 python -m pip install ruff pyright
 ruff check .
 pyright wikipedia_to_zotero.py
+node --test tests/test_plugin.cjs
+python scripts/build_plugin.py
 ```
+
+The plugin source is in [plugin/](plugin/). The build script packages an explicit
+allowlist of source files and the license into `dist/wikipedia-to-zotero-0.2.0.xpi`;
+it does not copy exports, credentials, or other local data. Node tests cover CSV
+compatibility with Python, metadata preservation, idempotence, bootstrap lifecycle,
+and deletion safeguards. Set `PYTHON` to a specific Python executable for Node's
+CSV interoperability test if `python` is not on your PATH.
+For plugin releases, keep the version/compatibility in
+[manifest.json](plugin/manifest.json) and [updates.json](plugin/updates.json) in
+sync, then attach the built XPI to the matching GitHub release. Zotero requires
+the manifest's update URL; it checks the public update feed for newer releases.
 
 GitHub Actions runs the tests on Windows, Linux, and macOS with Python 3.11 and
 3.14. Tests use synthetic data and fake clients: they do not log into accounts
 or mutate a real library. The browser export is exercised with a mocked browser
 environment on Node.js.
+
+The XPI has also been smoke-tested in an isolated Zotero 10.0.6 profile on macOS:
+installation/menu cleanup, native creates/updates, timestamp/tag verification,
+idempotence, complete file imports, private CSV backups, and isolated browser/API
+cookie contexts. Interactive Wikipedia sign-in and real account deletion are not
+part of automated testing. Windows/Linux CI validates the portable code and XPI
+build, not the native Zotero GUI on those platforms.
 
 Before publishing, scan the public candidate and committed history with
 GitGuardian's `ggshield`:

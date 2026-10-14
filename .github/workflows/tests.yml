@@ -28,6 +28,13 @@ jobs:
         with:
           node-version: "22"
       - run: node --test tests/test_browser_export.cjs
+      - run: node --test tests/test_plugin.cjs
+      - run: python scripts/build_plugin.py
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.11'
+        with:
+          name: zotero-plugin
+          path: dist/*.xpi
   lint:
     runs-on: ubuntu-latest
     steps:
