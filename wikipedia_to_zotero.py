@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import getpass
 import hashlib
 import http.cookiejar
 import json
 import os
-from pathlib import Path
 import sys
-from typing import Any
 import unicodedata
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener
@@ -42,12 +42,12 @@ class HTTPFailure(ImportFailure):
 def saved_time(value: str) -> str:
     """Validate a timezone-aware timestamp and normalize it to UTC."""
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, AttributeError) as exc:
+        parsed = datetime.fromisoformat(value)
+    except (ValueError, TypeError) as exc:
         raise ImportFailure("Invalid saved timestamp in source data") from exc
     if parsed.tzinfo is None:
         raise ImportFailure("Saved timestamps must include a timezone")
-    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return parsed.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def identity(url: str) -> ArticleID | None:
@@ -131,9 +131,10 @@ class Client:
                 raw = response.read()
                 return (json.loads(raw) if raw else None), response.headers
         except HTTPError as exc:
-            raise HTTPFailure(exc.code,
+            raise HTTPFailure(
+                exc.code,
                 f"{req.get_method()} {urlsplit(url).path}: HTTP {exc.code}. "
-                "Check service permissions and retry; no credentials were logged."
+                "Check service permissions and retry; no credentials were logged.",
             ) from None
         except (URLError, TimeoutError) as exc:
             raise ImportFailure(
@@ -165,15 +166,22 @@ class Wikipedia:
         """Authenticate, prompting for supported email or authenticator challenges."""
         token = self.query({"action": "query", "meta": "tokens", "type": "login"})
         login_token = token["query"]["tokens"]["logintoken"]
-        result = self.query({
-            "action": "clientlogin", "username": username, "password": password,
-            "logintoken": login_token, "loginreturnurl": "https://en.wikipedia.org/",
-        }, post=True)["clientlogin"]
+        result = self.query(
+            {
+                "action": "clientlogin",
+                "username": username,
+                "password": password,
+                "logintoken": login_token,
+                "loginreturnurl": "https://en.wikipedia.org/",
+            },
+            post=True,
+        )["clientlogin"]
         for _ in range(3):
             if result["status"] == "PASS":
                 return
             fields = {
-                name for challenge in result.get("requests", [])
+                name
+                for challenge in result.get("requests", [])
                 for name in challenge.get("fields", {})
             }
             supported = fields & {"token", "OATHToken"}
@@ -184,10 +192,15 @@ class Wikipedia:
                 )
             field = next(iter(supported))
             code = getpass.getpass("Wikipedia email/authenticator verification code: ")
-            result = self.query({
-                "action": "clientlogin", "logincontinue": "1",
-                "logintoken": login_token, field: code,
-            }, post=True)["clientlogin"]
+            result = self.query(
+                {
+                    "action": "clientlogin",
+                    "logincontinue": "1",
+                    "logintoken": login_token,
+                    field: code,
+                },
+                post=True,
+            )["clientlogin"]
         raise ImportFailure("Wikipedia verification did not complete; use browser export instead")
 
     def pages(self, parameters: JsonObject, field: str) -> list[JsonObject]:
@@ -205,10 +218,17 @@ class Wikipedia:
         lists = self.pages({"meta": "readinglists", "rllimit": "12"}, "readinglists")
         entries = []
         for start in range(0, len(lists), 100):
-            identifiers = "|".join(str(item["id"]) for item in lists[start:start + 100])
-            entries.extend(self.pages({
-                "list": "readinglistentries", "rlelists": identifiers, "rlelimit": "100",
-            }, "readinglistentries"))
+            identifiers = "|".join(str(item["id"]) for item in lists[start : start + 100])
+            entries.extend(
+                self.pages(
+                    {
+                        "list": "readinglistentries",
+                        "rlelists": identifiers,
+                        "rlelimit": "100",
+                    },
+                    "readinglistentries",
+                )
+            )
         return {"lists": lists, "entries": entries}
 
 
@@ -256,13 +276,17 @@ def articles_from_snapshot(snapshot: JsonObject) -> list[Article]:
                 raise ImportFailure("Source projects must be HTTPS Wikipedia origins")
             if not isinstance(entry["title"], str) or not entry["title"].strip():
                 raise ImportFailure("Source article titles must be nonempty strings")
-            url = entry["project"].rstrip("/") + "/wiki/" + quote(
-                entry["title"].replace(" ", "_"), safe="()_"
+            url = (
+                entry["project"].rstrip("/")
+                + "/wiki/"
+                + quote(entry["title"].replace(" ", "_"), safe="()_")
             )
             canonical = identity(url)
             if canonical is None:
                 raise ImportFailure("Source contains an unsupported Wikipedia project URL")
-            grouped[canonical].append({**entry, "url": url, "created": saved_time(entry["created"])})
+            grouped[canonical].append(
+                {**entry, "url": url, "created": saved_time(entry["created"])}
+            )
         articles = []
         for canonical, memberships in grouped.items():
             saved = min(item["created"] for item in memberships)
@@ -272,7 +296,9 @@ def articles_from_snapshot(snapshot: JsonObject) -> list[Article]:
                 for item in sorted(memberships, key=lambda item: item["listId"])
             ]
             first = memberships[0]
-            articles.append(Article(canonical, first["title"], first["url"], saved, tags, provenance))
+            articles.append(
+                Article(canonical, first["title"], first["url"], saved, tags, provenance)
+            )
         return articles
     except (KeyError, TypeError, ValueError) as exc:
         raise ImportFailure("Malformed saved-list export; see the documented JSON format") from exc
@@ -303,7 +329,7 @@ def plan_import(
     planned = []
     backup = []
     new_keys: set[str] = set()
-    accessed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    accessed = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     for article in articles:
         matches = by_url.get(article.canonical, [])
         if matches:
@@ -317,20 +343,32 @@ def plan_import(
                 lines += [line for line in article.provenance if line not in lines]
                 fields = {"dateAdded": article.saved, "tags": tags, "extra": "\n".join(lines)}
                 changed = any(old.get(name) != value for name, value in fields.items())
-                payload = {"key": old["key"], "version": old["version"], **fields} if changed else None
-                planned.append(PlannedItem(old["key"], article, payload, "update" if changed else "unchanged"))
+                payload = (
+                    {"key": old["key"], "version": old["version"], **fields} if changed else None
+                )
+                planned.append(
+                    PlannedItem(old["key"], article, payload, "update" if changed else "unchanged")
+                )
         else:
             key = stable_key(article.canonical)
             if key in by_key or key in new_keys:
                 raise ImportFailure("Generated item-key collision; refusing to overwrite an item")
             new_keys.add(key)
             payload = {
-                "key": key, "version": 0, "itemType": "encyclopediaArticle",
-                "title": article.title, "url": article.url, "encyclopediaTitle": "Wikipedia",
-                "language": article.canonical[0].split(".")[0], "dateAdded": article.saved,
-                "accessDate": accessed, "tags": [{"tag": tag} for tag in article.tags],
+                "key": key,
+                "version": 0,
+                "itemType": "encyclopediaArticle",
+                "title": article.title,
+                "url": article.url,
+                "encyclopediaTitle": "Wikipedia",
+                "language": article.canonical[0].split(".")[0],
+                "dateAdded": article.saved,
+                "accessDate": accessed,
+                "tags": [{"tag": tag} for tag in article.tags],
                 "extra": "\n".join(article.provenance),
-                "creators": [], "collections": [], "relations": {},
+                "creators": [],
+                "collections": [],
+                "relations": {},
             }
             planned.append(PlannedItem(key, article, payload, "create"))
     return planned, backup
@@ -404,7 +442,7 @@ class Zotero:
     def verify(self, items: list[PlannedItem]) -> None:
         """Read back URLs, exact saved times, folder tags, and per-folder timestamps."""
         for start in range(0, len(items), 100):
-            batch = items[start:start + 100]
+            batch = items[start : start + 100]
             wrappers = self.read("users/0/items?itemKey=" + ",".join(item.key for item in batch))
             actual = {wrapper["key"]: wrapper["data"] for wrapper in wrappers}
             for planned in batch:
@@ -417,16 +455,24 @@ class Zotero:
                     or not set(article.tags) <= {tag["tag"] for tag in data.get("tags", [])}
                     or not set(article.provenance) <= set(data.get("extra", "").splitlines())
                 ):
-                    raise ImportFailure(f"Read-back verification failed for Zotero item {planned.key}")
+                    raise ImportFailure(
+                        f"Read-back verification failed for Zotero item {planned.key}"
+                    )
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point; credentials are prompted or read only from explicit environment names."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, help="Import a browser-exported saved-list JSON file")
-    parser.add_argument("--state-dir", type=Path, default=None, help="Private backup/export directory")
+    parser.add_argument(
+        "--source", type=Path, help="Import a browser-exported saved-list JSON file"
+    )
+    parser.add_argument(
+        "--state-dir", type=Path, default=None, help="Private backup/export directory"
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate and plan without writing")
-    parser.add_argument("--yes", action="store_true", help="Skip CLI confirmation, not Zotero permission")
+    parser.add_argument(
+        "--yes", action="store_true", help="Skip CLI confirmation, not Zotero permission"
+    )
     args = parser.parse_args(argv)
     try:
         if args.source:
@@ -435,14 +481,17 @@ def main(argv: list[str] | None = None) -> int:
         else:
             wikipedia = Wikipedia(Client())
             username = os.environ.get("WIKIPEDIA_USERNAME") or input("Wikipedia username: ")
-            password = os.environ.get("WIKIPEDIA_PASSWORD") or getpass.getpass("Wikipedia password: ")
+            password = os.environ.get("WIKIPEDIA_PASSWORD") or getpass.getpass(
+                "Wikipedia password: "
+            )
             wikipedia.login(username, password)
             snapshot = wikipedia.snapshot()
         articles = articles_from_snapshot(snapshot)
         zotero = Zotero(Client())
         planned, backup = plan_import(articles, zotero.existing_items())
         summary = {
-            "lists": len(snapshot["lists"]), "memberships": len(snapshot["entries"]),
+            "lists": len(snapshot["lists"]),
+            "memberships": len(snapshot["entries"]),
             "unique_articles": len(articles),
             "operations": dict(Counter(item.operation for item in planned)),
         }
@@ -450,32 +499,42 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             return 0
         writes = [item for item in planned if item.payload is not None]
-        if writes and not args.yes:
-            if input("Import these items and update existing saved timestamps/tags? [y/N] ").lower() != "y":
-                print("Cancelled; Zotero was not changed.")
-                return 0
+        if (
+            writes
+            and not args.yes
+            and input(
+                "Import these items and update existing saved timestamps/tags? [y/N] "
+            ).lower()
+            != "y"
+        ):
+            print("Cancelled; Zotero was not changed.")
+            return 0
         directory = args.state_dir or state_directory()
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         private_json(directory / f"snapshot-{stamp}.json", snapshot)
         private_json(directory / f"backup-{stamp}.json", backup)
         if writes:
             print("Approve the import in Zotero's permission dialog.", flush=True)
             zotero.authorize()
             for start in range(0, len(writes), 50):
-                batch = writes[start:start + 50]
+                batch = writes[start : start + 50]
                 zotero.write_batch(batch)
                 if start == 0:
                     zotero.verify(batch)
                 print(f"Saved {min(start + 50, len(writes))}/{len(writes)} changes", flush=True)
         zotero.verify(planned)
-        private_json(directory / f"verification-{stamp}.json", {**summary, "verified": len(planned)})
+        private_json(
+            directory / f"verification-{stamp}.json", {**summary, "verified": len(planned)}
+        )
         print(f"Verified all {len(planned)} Zotero items. Backups: {directory}")
         return 0
     except (ImportFailure, OSError, json.JSONDecodeError, EOFError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("Interrupted. Rerun to resume; existing items will not be duplicated.", file=sys.stderr)
+        print(
+            "Interrupted. Rerun to resume; existing items will not be duplicated.", file=sys.stderr
+        )
         return 130
 
 

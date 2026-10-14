@@ -5,9 +5,9 @@ import copy
 import io
 import json
 import os
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import wikipedia_to_zotero as app
@@ -20,20 +20,35 @@ def source():
             {"id": 2, "name": "Science", "size": 1},
         ],
         "entries": [
-            {"id": 11, "listId": 1, "project": "https://en.wikipedia.org",
-             "title": "Example article", "created": "2020-01-01T02:00:00+02:00"},
-            {"id": 12, "listId": 2, "project": "https://en.wikipedia.org",
-             "title": "Example article", "created": "2021-01-01T00:00:00Z"},
+            {
+                "id": 11,
+                "listId": 1,
+                "project": "https://en.wikipedia.org",
+                "title": "Example article",
+                "created": "2020-01-01T02:00:00+02:00",
+            },
+            {
+                "id": 12,
+                "listId": 2,
+                "project": "https://en.wikipedia.org",
+                "title": "Example article",
+                "created": "2021-01-01T00:00:00Z",
+            },
         ],
     }
 
 
 def bibliography(key="ABCD2345", **fields):
     return {
-        "key": key, "version": 4, "itemType": "encyclopediaArticle",
-        "title": "Preserved title", "url": "https://en.m.wikipedia.org/wiki/Example_article#History",
-        "dateAdded": "2025-01-01T00:00:00Z", "extra": "Keep my notes",
-        "tags": [{"tag": "existing", "type": 1}], "collections": ["EFGH2345"],
+        "key": key,
+        "version": 4,
+        "itemType": "encyclopediaArticle",
+        "title": "Preserved title",
+        "url": "https://en.m.wikipedia.org/wiki/Example_article#History",
+        "dateAdded": "2025-01-01T00:00:00Z",
+        "extra": "Keep my notes",
+        "tags": [{"tag": "existing", "type": 1}],
+        "collections": ["EFGH2345"],
         **fields,
     }
 
@@ -53,7 +68,8 @@ class FakeClient:
             selected = url.split("itemKey=", 1)[1].split(",") if "itemKey=" in url else self.items
             return [
                 {"key": key, "data": copy.deepcopy(self.items[key])}
-                for key in selected if key in self.items
+                for key in selected
+                if key in self.items
             ], headers
         self.writes += 1
         result = {"successful": {}, "success": {}, "failed": {}, "unchanged": {}}
@@ -124,7 +140,9 @@ class SourceTests(unittest.TestCase):
 
     def test_unicode_and_language_retained(self):
         snapshot = source()
-        snapshot["entries"][1].update(project="https://bg.wikipedia.org", title="\u041f\u0440\u0438\u043c\u0435\u0440")
+        snapshot["entries"][1].update(
+            project="https://bg.wikipedia.org", title="\u041f\u0440\u0438\u043c\u0435\u0440"
+        )
         self.assertEqual(len(app.articles_from_snapshot(snapshot)), 2)
 
     def test_empty_export(self):
@@ -255,8 +273,12 @@ class PlanningTests(unittest.TestCase):
 
 class CLITests(unittest.TestCase):
     def test_platform_state_directories(self):
-        with patch.dict(os.environ, {"LOCALAPPDATA": "/windows-user", "XDG_STATE_HOME": "/linux-user"}):
-            self.assertEqual(app.state_directory("win32"), Path("/windows-user/wikipedia-to-zotero"))
+        with patch.dict(
+            os.environ, {"LOCALAPPDATA": "/windows-user", "XDG_STATE_HOME": "/linux-user"}
+        ):
+            self.assertEqual(
+                app.state_directory("win32"), Path("/windows-user/wikipedia-to-zotero")
+            )
             self.assertEqual(app.state_directory("linux"), Path("/linux-user/wikipedia-to-zotero"))
             self.assertEqual(
                 app.state_directory("darwin"),
@@ -267,7 +289,10 @@ class CLITests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "private" / "source.json"
             app.private_json(path, {"text": "\u041f\u0440\u0438\u043c\u0435\u0440"})
-            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"text": "\u041f\u0440\u0438\u043c\u0435\u0440"})
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                {"text": "\u041f\u0440\u0438\u043c\u0435\u0440"},
+            )
             self.assertFalse(path.with_suffix(".json.tmp").exists())
             if os.name != "nt":
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
@@ -278,7 +303,10 @@ class CLITests(unittest.TestCase):
             path.write_text(json.dumps(source()), encoding="utf-8")
             client = FakeClient()
             state = Path(directory) / "state"
-            with patch.object(app, "Client", return_value=client), contextlib.redirect_stdout(io.StringIO()):
+            with (
+                patch.object(app, "Client", return_value=client),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
                 code = app.main(["--source", str(path), "--state-dir", str(state), "--dry-run"])
             self.assertEqual(code, 0)
             self.assertFalse(state.exists())
@@ -292,7 +320,10 @@ class CLITests(unittest.TestCase):
             state = Path(directory) / "private"
             client = FakeClient()
             args = ["--source", str(path), "--state-dir", str(state), "--yes"]
-            with patch.object(app, "Client", return_value=client), contextlib.redirect_stdout(io.StringIO()):
+            with (
+                patch.object(app, "Client", return_value=client),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
                 self.assertEqual(app.main(args), 0)
                 self.assertEqual(app.main(args), 0)
             self.assertEqual(len(client.items), 1)
@@ -320,8 +351,10 @@ class CLITests(unittest.TestCase):
             {"clientlogin": {"status": "UI", "requests": [{"fields": {"token": {}}}]}},
             {"clientlogin": {"status": "PASS"}},
         ]
-        with patch.object(wiki, "query", side_effect=responses) as query, \
-                patch.object(app.getpass, "getpass", return_value="synthetic-code"):
+        with (
+            patch.object(wiki, "query", side_effect=responses) as query,
+            patch.object(app.getpass, "getpass", return_value="synthetic-code"),
+        ):
             wiki.login("example-user", "synthetic-password")
         self.assertEqual(query.call_args_list[-1].args[0]["token"], "synthetic-code")
 
