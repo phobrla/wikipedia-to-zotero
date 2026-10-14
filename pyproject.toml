@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wikipedia-to-zotero"
+version = "0.1.0"
+description = "Import Wikipedia saved lists into Zotero with folder tags and original saved timestamps."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: OS Independent",
+]
+dependencies = []
+
+[project.scripts]
+wikipedia-to-zotero = "wikipedia_to_zotero:main"
+
+[project.urls]
+Repository = "https://github.com/phobrla/wikipedia-to-zotero"
+
+[tool.setuptools]
+py-modules = ["wikipedia_to_zotero"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
