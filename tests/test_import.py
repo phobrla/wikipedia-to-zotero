@@ -2,6 +2,7 @@
 
 import contextlib
 import copy
+import csv
 import io
 import json
 import os
@@ -357,6 +358,148 @@ class CLITests(unittest.TestCase):
         ):
             wiki.login("example-user", "synthetic-password")
         self.assertEqual(query.call_args_list[-1].args[0]["token"], "synthetic-code")
+
+
+class CSVTests(unittest.TestCase):
+    def test_round_trip_preserves_every_article_tag_and_timestamp(self):
+        snapshot = source()
+        snapshot["lists"][1]["name"] = 'Science, "reference" \u03a9'
+        snapshot["entries"][0]["title"] = 'An article, "quoted" \u03a9'
+        snapshot["entries"][1]["title"] = snapshot["entries"][0]["title"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private" / "saved.csv"
+            self.assertEqual(app.export_csv(path, snapshot), 1)
+            self.assertTrue(path.read_bytes().startswith(b"\xef\xbb\xbf"))
+            restored = app.articles_from_snapshot(app.snapshot_from_csv(path))
+            expected = app.articles_from_snapshot(snapshot)
+            self.assertEqual(restored[0].canonical, expected[0].canonical)
+            self.assertEqual(restored[0].title, expected[0].title)
+            self.assertEqual(restored[0].saved, expected[0].saved)
+            self.assertEqual(restored[0].tags, expected[0].tags)
+            self.assertEqual(set(restored[0].provenance), set(expected[0].provenance))
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_export_cli_never_contacts_zotero_or_requests_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.json"
+            path.write_text(json.dumps(source()), encoding="utf-8")
+            output = Path(directory) / "backup.csv"
+            with (
+                patch.object(app, "Client", side_effect=AssertionError("Network must not be used")),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(app.main(["--source", str(path), "--export-csv", str(output)]), 0)
+            self.assertTrue(output.exists())
+
+    def test_csv_cli_import_and_rerun(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "saved.csv"
+            app.export_csv(path, source())
+            client = FakeClient()
+            args = [
+                "--source-csv",
+                str(path),
+                "--yes",
+                "--state-dir",
+                str(Path(directory) / "state"),
+            ]
+            with (
+                patch.object(app, "Client", return_value=client),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(app.main(args), 0)
+                self.assertEqual(app.main(args), 0)
+            self.assertEqual(client.writes, 1)
+            self.assertEqual(len(client.items), 1)
+            data = next(iter(client.items.values()))
+            self.assertEqual(data["dateAdded"], "2020-01-01T00:00:00Z")
+            self.assertEqual({item["tag"] for item in data["tags"]}, {"Science", "default"})
+
+    def test_existing_destination_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "saved.csv"
+            path.write_text("keep", encoding="utf-8")
+            with self.assertRaises(FileExistsError):
+                app.export_csv(path, source())
+            self.assertEqual(path.read_text(encoding="utf-8"), "keep")
+
+    def test_partial_export_is_removed_on_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "saved.csv"
+            with (
+                patch.object(app.csv, "DictWriter", side_effect=OSError("Synthetic write failure")),
+                self.assertRaises(OSError),
+            ):
+                app.export_csv(path, source())
+            self.assertFalse(path.exists())
+
+    def test_reject_inconsistent_or_duplicate_csv_before_network(self):
+        for column, value in [
+            ("date_added", "2025-01-01T00:00:00Z"),
+            ("tags", '["wrong"]'),
+            ("extra", "changed provenance"),
+            ("saved_lists", "[]"),
+            ("saved_lists", '[{"name": "invalid"}]'),
+            ("title", "Mismatched title"),
+            ("url", "https://example.org/wiki/Example"),
+        ]:
+            with (
+                self.subTest(column=column, value=value),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                path = Path(directory) / "saved.csv"
+                app.export_csv(path, source())
+                with path.open(encoding="utf-8-sig", newline="") as stream:
+                    rows = list(csv.DictReader(stream))
+                rows[0][column] = value
+                with path.open("w", encoding="utf-8-sig", newline="") as stream:
+                    writer = csv.DictWriter(stream, fieldnames=app.CSV_FIELDS)
+                    writer.writeheader()
+                    writer.writerows(rows)
+                with (
+                    patch.object(app, "Client", side_effect=AssertionError("No network allowed")),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(app.main(["--source-csv", str(path)]), 1)
+
+    def test_duplicate_article_rows_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "saved.csv"
+            app.export_csv(path, source())
+            with path.open(encoding="utf-8-sig", newline="") as stream:
+                rows = list(csv.DictReader(stream))
+            with path.open("a", encoding="utf-8", newline="") as stream:
+                csv.DictWriter(stream, fieldnames=app.CSV_FIELDS).writerows(rows)
+            with self.assertRaisesRegex(app.ImportFailure, "duplicate"):
+                app.snapshot_from_csv(path)
+
+    def test_invalid_headers_and_truncated_rows_rejected(self):
+        for text in [
+            "title,url\nExample,https://example.org\n",
+            ",".join(app.CSV_FIELDS) + "\nExample\n",
+        ]:
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "bad.csv"
+                path.write_text(text, encoding="utf-8")
+                with self.assertRaises(app.ImportFailure):
+                    app.snapshot_from_csv(path)
+
+    def test_empty_export_has_header_and_round_trips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "empty.csv"
+            self.assertEqual(app.export_csv(path, {"lists": [], "entries": []}), 0)
+            self.assertEqual(app.snapshot_from_csv(path), {"lists": [], "entries": []})
+
+    def test_dry_run_export_conflict_and_source_conflict(self):
+        for args in [
+            ["--dry-run", "--export-csv", "unused.csv"],
+            ["--source", "unused.json", "--source-csv", "unused.csv"],
+        ]:
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as raised:
+                    app.main(args)
+                self.assertEqual(raised.exception.code, 2)
 
 
 if __name__ == "__main__":

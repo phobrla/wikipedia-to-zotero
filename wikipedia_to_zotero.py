@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import getpass
 import hashlib
 import http.cookiejar
@@ -25,6 +26,7 @@ USER_AGENT = "WikipediaToZotero/0.1 (https://github.com/phobrla/wikipedia-to-zot
 KEY_ALPHABET = "23456789ABCDEFGHIJKLMNPQRSTUVWXYZ"
 JsonObject = dict[str, Any]
 ArticleID = tuple[str, str]
+CSV_FIELDS = ["title", "url", "date_added", "tags", "extra", "saved_lists"]
 
 
 class ImportFailure(Exception):
@@ -374,6 +376,126 @@ def plan_import(
     return planned, backup
 
 
+def export_csv(path: Path, snapshot: JsonObject) -> int:
+    """Export one UTF-8 CSV row per article without contacting or modifying Zotero."""
+    articles = articles_from_snapshot(snapshot)
+    names = {item["id"]: item["name"] for item in snapshot["lists"]}
+    if len(set(names.values())) != len(names):
+        raise ImportFailure("CSV export requires unique reading-list names")
+    memberships: dict[ArticleID, list[JsonObject]] = defaultdict(list)
+    for entry in snapshot["entries"]:
+        url = (
+            entry["project"].rstrip("/")
+            + "/wiki/"
+            + quote(entry["title"].replace(" ", "_"), safe="()_")
+        )
+        canonical = identity(url)
+        if canonical is None:
+            raise ImportFailure("Source contains an unsupported Wikipedia project URL")
+        memberships[canonical].append(
+            {"name": names[entry["listId"]], "created": saved_time(entry["created"])}
+        )
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as output:
+            writer = csv.DictWriter(output, fieldnames=CSV_FIELDS)
+            writer.writeheader()
+            for article in articles:
+                writer.writerow(
+                    {
+                        "title": article.title,
+                        "url": article.url,
+                        "date_added": article.saved,
+                        "tags": json.dumps(article.tags, ensure_ascii=False),
+                        "extra": "\n".join(article.provenance),
+                        "saved_lists": json.dumps(
+                            memberships[article.canonical], ensure_ascii=False
+                        ),
+                    }
+                )
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException:
+        # A partial export must not be mistaken for a complete re-import backup.
+        path.unlink()
+        raise
+    return len(articles)
+
+
+def snapshot_from_csv(path: Path) -> JsonObject:
+    """Read this tool's CSV format, validating redundant metadata before any writes."""
+    lists: list[JsonObject] = []
+    entries: list[JsonObject] = []
+    list_ids: dict[str, int] = {}
+    seen: set[ArticleID] = set()
+    with path.open(encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source, strict=True)
+        if reader.fieldnames != CSV_FIELDS:
+            raise ImportFailure("CSV columns do not match this tool's export format")
+        for row_number, row in enumerate(reader, start=2):
+            try:
+                if None in row or any(value is None for value in row.values()):
+                    raise ImportFailure("CSV row has missing or extra fields")
+                canonical = identity(row["url"])
+                if canonical is None or canonical in seen:
+                    raise ImportFailure("CSV contains an invalid or duplicate article URL")
+                if canonical[1] != unicodedata.normalize("NFC", row["title"].replace("_", " ")):
+                    raise ImportFailure("CSV title does not match the article URL")
+                tags = json.loads(row["tags"])
+                saved_lists = json.loads(row["saved_lists"])
+                if (
+                    not isinstance(tags, list)
+                    or not all(isinstance(tag, str) for tag in tags)
+                    or not isinstance(saved_lists, list)
+                    or not saved_lists
+                ):
+                    raise ImportFailure("CSV tags and saved_lists must be JSON arrays")
+                if any(
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("name"), str)
+                    or not item["name"].strip()
+                    or "\n" in item["name"]
+                    or "\r" in item["name"]
+                    for item in saved_lists
+                ):
+                    raise ImportFailure("CSV saved_lists contains an invalid list name")
+                names = [item["name"] for item in saved_lists]
+                if len(names) != len(set(names)) or sorted(tags) != sorted(names):
+                    raise ImportFailure("CSV tags do not match unique saved-list names")
+                times = [saved_time(item["created"]) for item in saved_lists]
+                if saved_time(row["date_added"]) != min(times):
+                    raise ImportFailure("CSV date_added is not the earliest saved timestamp")
+                expected_extra = {f"Wikipedia saved: {min(times)}"} | {
+                    f"Wikipedia list saved: {item['name']} | {created}"
+                    for item, created in zip(saved_lists, times, strict=True)
+                }
+                if set(row["extra"].splitlines()) != expected_extra:
+                    raise ImportFailure("CSV Extra does not match the saved-list timestamps")
+                seen.add(canonical)
+                for item, created in zip(saved_lists, times, strict=True):
+                    name = item["name"]
+                    if name not in list_ids:
+                        list_ids[name] = len(lists) + 1
+                        lists.append({"id": list_ids[name], "name": name, "size": 0})
+                    identifier = list_ids[name]
+                    lists[identifier - 1]["size"] += 1
+                    entries.append(
+                        {
+                            "id": len(entries) + 1,
+                            "listId": identifier,
+                            "project": "https://" + canonical[0],
+                            "title": row["title"],
+                            "created": created,
+                        }
+                    )
+            except (ImportFailure, ValueError, KeyError, TypeError) as exc:
+                raise ImportFailure(f"Invalid CSV record {row_number}: {exc}") from exc
+    snapshot = {"lists": lists, "entries": entries}
+    articles_from_snapshot(snapshot)
+    return snapshot
+
+
 class Zotero:
     """Use Zotero's supported local API without requesting account credentials."""
 
@@ -463,8 +585,18 @@ class Zotero:
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point; credentials are prompted or read only from explicit environment names."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
+    sources = parser.add_mutually_exclusive_group()
+    sources.add_argument(
         "--source", type=Path, help="Import a browser-exported saved-list JSON file"
+    )
+    sources.add_argument(
+        "--source-csv", type=Path, help="Re-import a CSV generated by --export-csv"
+    )
+    parser.add_argument(
+        "--export-csv",
+        type=Path,
+        metavar="PATH",
+        help="Export saved items to a new private CSV file and exit without contacting Zotero",
     )
     parser.add_argument(
         "--state-dir", type=Path, default=None, help="Private backup/export directory"
@@ -474,10 +606,14 @@ def main(argv: list[str] | None = None) -> int:
         "--yes", action="store_true", help="Skip CLI confirmation, not Zotero permission"
     )
     args = parser.parse_args(argv)
+    if args.export_csv and args.dry_run:
+        parser.error("--export-csv writes a file and cannot be combined with --dry-run")
     try:
         if args.source:
             with args.source.open(encoding="utf-8") as source:
                 snapshot = json.load(source)
+        elif args.source_csv:
+            snapshot = snapshot_from_csv(args.source_csv)
         else:
             wikipedia = Wikipedia(Client())
             username = os.environ.get("WIKIPEDIA_USERNAME") or input("Wikipedia username: ")
@@ -487,6 +623,10 @@ def main(argv: list[str] | None = None) -> int:
             wikipedia.login(username, password)
             snapshot = wikipedia.snapshot()
         articles = articles_from_snapshot(snapshot)
+        if args.export_csv:
+            count = export_csv(args.export_csv, snapshot)
+            print(f"Exported {count} articles to {args.export_csv}. Zotero was not contacted.")
+            return 0
         zotero = Zotero(Client())
         planned, backup = plan_import(articles, zotero.existing_items())
         summary = {
@@ -528,7 +668,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Verified all {len(planned)} Zotero items. Backups: {directory}")
         return 0
-    except (ImportFailure, OSError, json.JSONDecodeError, EOFError) as exc:
+    except (ImportFailure, OSError, json.JSONDecodeError, csv.Error, EOFError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -86,6 +86,55 @@ Incomplete list counts and duplicate entry IDs are rejected before writes.
 Saved-list synchronization must already be enabled; on-device-only items are
 not available through Wikipedia's account API.
 
+## Private CSV backup and bulk re-import
+
+Export a reusable CSV **without contacting or modifying Zotero**:
+
+```console
+python -m wikipedia_to_zotero --source "path/to/wikipedia-saved-snapshot.json" --export-csv "path/to/private/wikipedia-saved.csv"
+```
+
+Without `--source`, the same flag logs into Wikipedia interactively and exports
+your current Saved items. The destination must not already exist; exports never
+overwrite an existing file. `--export-csv` is an export-only operation and cannot
+be combined with `--dry-run`.
+
+To bulk re-import later, use this tool:
+
+```console
+python -m wikipedia_to_zotero --source-csv "path/to/private/wikipedia-saved.csv" --dry-run
+python -m wikipedia_to_zotero --source-csv "path/to/private/wikipedia-saved.csv"
+```
+
+**This is the tool's round-trip CSV format, not a native Zotero CSV import
+format.** Zotero's desktop importer does not directly import this CSV. The
+`--source-csv` flag applies the same duplicate avoidance, backups, permission
+checks, and read-back verification as JSON imports.
+
+The UTF-8 CSV (with a BOM for spreadsheet compatibility) contains one row per
+distinct article and these columns:
+
+| Column | Meaning |
+| --- | --- |
+| `title` | Original Wikipedia article title |
+| `url` | Canonical Wikipedia article URL |
+| `date_added` | Earliest saved timestamp, in UTC |
+| `tags` | JSON array of all folder/list names |
+| `extra` | Earliest and per-folder timestamps as provenance text |
+| `saved_lists` | JSON array of objects with `name` and `created` for each folder |
+
+CSV quoting preserves commas, quotes, newlines, and non-ASCII text. List names
+must be unique. Empty folders do not have article rows and are not retained;
+keep the original JSON if you need the complete list inventory. Re-import
+validates the redundant tags, Date Added, and provenance against `saved_lists`
+and rejects inconsistent or duplicate records before modifying Zotero.
+
+Store the CSV **outside your repository** in a private directory. All `*.csv`
+files are gitignored as an additional safeguard; no exports or personal data
+belong in the public repository. Exported cells retain original text, so use a
+spreadsheet's text-import mode rather than enabling formulas or external links
+when inspecting untrusted article titles. Prefer the unchanged CSV for re-import.
+
 ## Safety, progress, and resuming
 
 The CLI prints the full plan before changing Zotero. Approve the local permission
